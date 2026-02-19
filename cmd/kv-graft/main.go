@@ -1,9 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/eika123/kv-graft/internal/server"
+
+	"encoding/json"
 )
 
 func stateFactory() map[string]string {
@@ -20,19 +23,50 @@ type StateMachineInterface interface {
 	getTotalState() StateMachine
 }
 
-func (sm *StateMachine) handleGet(w http.ResponseWriter, r *http.Request) {
-
-	w.Write([]byte("hello from get"))
+func helloWorldHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintln(w, "Hello, World!")
 }
 
-func (sm *StateMachine) handlePut(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("hello from put"))
+func (sm *StateMachine) handleGetByKey(w http.ResponseWriter, r *http.Request) {
+	type ResponseGetByKey struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	key := r.URL.Query().Get("key")
+	value, exists := sm.kvmap[key]
+	if !exists {
+		http.Error(w, "Key not found", http.StatusNotFound)
+		return
+	}
+	response := ResponseGetByKey{
+		Key:   key,
+		Value: value,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (sm *StateMachine) handlePutByKey(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("PUT request received")
+	type RequestPut struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	var req RequestPut
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	sm.kvmap[req.Key] = req.Value
+	w.WriteHeader(http.StatusOK)
 }
 
 func handlerFactory(appState *StateMachine) http.Handler {
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/get", appState.handleGet)
-	mux.HandleFunc("/put", appState.handlePut)
+	mux.HandleFunc("GET /items", appState.handleGetByKey)
+	mux.HandleFunc("PUT /items", appState.handlePutByKey)
+	mux.HandleFunc("/hello", helloWorldHandler)
 	return mux
 }
 
@@ -45,6 +79,7 @@ func main() {
 	handler := handlerFactory(appState)
 
 	kvserver := server.NewServer(8080, handler)
+	fmt.Println("Starting server on  http://localhost:8080")
 	if err := kvserver.Start(); err != nil {
 		panic(err)
 	}

@@ -44,7 +44,7 @@ func main() {
 
 	handler := handlerFactory(appState)
 
-	kvserver := server.NewServer(8080, handler, stateFactory)
+	kvserver := server.NewServer(8080, handler)
 	if err := kvserver.Start(); err != nil {
 		panic(err)
 	}

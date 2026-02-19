@@ -1,0 +1,13 @@
+
+
+
+
+
+# environment files
+.env
+
+# executables
+main
+bin
+
+

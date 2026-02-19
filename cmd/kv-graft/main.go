@@ -17,6 +17,22 @@ type StateMachine struct {
 	kvmap map[string]string
 }
 
+func (sm *StateMachine) applyStateChange(command string) error {
+	// PUT request bodies are in JSON format: {"key": "somekey", "value": "somevalue"},
+	// and log entries are in the format: "PUT /items {"key": "somekey", "value": "somevalue"}"
+	type RequestPut struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	jsonCommandBody := command[len("PUT /items "):]
+	var req RequestPut
+	if err := json.Unmarshal([]byte(jsonCommandBody), &req); err != nil {
+		return fmt.Errorf("invalid command format: %v", err)
+	}
+	sm.kvmap[req.Key] = req.Value
+	return nil
+}
+
 type StateMachineInterface interface {
 	applyStateChange(key, value string)
 	getState(key string) (string, bool)
@@ -62,7 +78,6 @@ func (sm *StateMachine) handlePutByKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlerFactory(appState *StateMachine) http.Handler {
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /items", appState.handleGetByKey)
 	mux.HandleFunc("PUT /items", appState.handlePutByKey)
@@ -71,13 +86,10 @@ func handlerFactory(appState *StateMachine) http.Handler {
 }
 
 func main() {
-
 	appState := &StateMachine{
 		kvmap: stateFactory(),
 	}
-
 	handler := handlerFactory(appState)
-
 	kvserver := server.NewServer(8080, handler)
 	fmt.Println("Starting server on  http://localhost:8080")
 	if err := kvserver.Start(); err != nil {

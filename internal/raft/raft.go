@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"net/rpc"
 	"os"
 )
+
+RAFT_PORT = 8950
 
 type LogEntry struct {
 	Position uint64
@@ -20,16 +23,59 @@ type Log struct {
 }
 
 type RaftNode struct {
-	id   uint64
-	ip   string
-	port uint16
+	id            uint64
+	ip            string
+	port          uint16
+	RaftNodeState RaftState
 }
 
-func (rn *RaftNode) generateRaftNodeID() uint64 {
+func calculateRaftNodeId(ip string, port uint16) uint64 {
 	// hash ip:port
 	hash := fnv.New64a()
-	fmt.Fprintf(hash, "%s:%d", rn.ip, rn.port)
+	fmt.Fprintf(hash, "%s:%d", ip, port)
 	return hash.Sum64()
+}
+
+func NewRaftNode(ip string, port uint16, logFile string, applicationStateMachine ApplicationState) (*RaftNode, error) {
+	rn := &RaftNode{
+		ip:   ip,
+		port: port,
+		id:   calculateRaftNodeId(ip, port),
+		RaftNodeState: RaftState{
+			currentTerm: 0,
+			votedFor:    0,
+			log: Log{
+				logfile:        logFile,
+				memoryCapacity: 1000, // TODO: make this configurable
+			},
+			commitIndex: 0,
+			lastApplied: 0,
+			nextIndex:   make(map[uint64]uint64),
+			matchIndex:  make(map[uint64]uint64),
+			isLeader:    false,
+			lastEntry: LogEntry{
+				Position: 0,
+				Term:     0,
+				Command:  "",
+			},
+			ApplicationStateMachine: applicationStateMachine,
+		},
+	}
+	// read last log entry from log file and update RaftNodeState.lastEntry
+	lastEntry, err := rn.RaftNodeState.log._readLastLogEntry()
+	if err != nil {
+		return nil, err
+	}
+	rn.RaftNodeState.lastEntry = lastEntry
+	return rn, nil
+}
+
+func (rn *RaftNode) RegisterRPCs() error {
+	if err := rpc.Register(rn.RaftNodeState); err != nil {
+		return err
+	}
+	rpc.HandleHTTP()
+	return nil
 }
 
 type ApplicationState interface {
@@ -63,10 +109,7 @@ type RaftState struct {
 }
 
 type requestVoteArgs struct {
-	Term         uint64
-	CandidateID  uint64
-	LastLogIndex uint64
-	LastLogTerm  uint64
+	Term, CandidateID, LastLogIndex, LastLogTerm uint64
 }
 
 type requestVoteReply struct {
@@ -106,12 +149,56 @@ func (rs *RaftState) RequestVoteRPC(args requestVoteArgs, reply *requestVoteRepl
 }
 
 // used by leader only
-func (rs *RaftState) newLogEntry(command string) LogEntry {
-	return LogEntry{
-		Position: rs.lastEntry.Position + 1,
-		Term:     rs.currentTerm,
-		Command:  command,
+func (rn *RaftNode) newLogEntry(command string) (LogEntry, error) {
+	if rn.RaftNodeState.isLeader == false {
+		return LogEntry{}, fmt.Errorf("not leader")
 	}
+	return LogEntry{
+		Position: rn.RaftNodeState.lastEntry.Position + 1,
+		Term:     rn.RaftNodeState.currentTerm,
+		Command:  command,
+	}, nil
+}
+
+func (rn *RaftNode) ReplicateCommand(command string) error {
+	if rn.RaftNodeState.isLeader == false {
+		return fmt.Errorf("only leader can replicate commands")
+	}
+	newEntry, err := rn.newLogEntry(command)
+	if err != nil {
+		return err
+	}
+
+	// send newEntry to replicas
+	appendArgs := appendEntriesArgs{
+		Term:         rn.RaftNodeState.currentTerm,
+		LeaderID:     rn.id,
+		PrevLogIndex: rn.RaftNodeState.lastEntry.Position,
+		PrevLogTerm:  rn.RaftNodeState.lastEntry.Term,
+		Entries:      []LogEntry{newEntry},
+		LeaderCommit: rn.RaftNodeState.commitIndex,
+	}
+
+	reply := appendEntriesReply{}
+	// send appendArgs to replicas and get reply, if majority of replicas reply success, then update commitIndex and apply log entry to state machine
+
+	rn.RaftNodeState.AppendEntriesRPC(appendArgs, &reply)
+
+	return nil
+}
+
+type appendEntriesArgs struct {
+	Term         uint64
+	LeaderID     uint64
+	PrevLogIndex uint64
+	PrevLogTerm  uint64
+	Entries      []LogEntry
+	LeaderCommit uint64
+}
+
+type appendEntriesReply struct {
+	Term    uint64
+	Success bool
 }
 
 func (rs *RaftState) AppendEntriesRPC(args appendEntriesArgs, reply *appendEntriesReply) error {
@@ -119,7 +206,6 @@ func (rs *RaftState) AppendEntriesRPC(args appendEntriesArgs, reply *appendEntri
 }
 
 // ================================  Log management functions ================================
-
 func (rs *RaftState) appendLogEntry(entry LogEntry) error {
 	if entry.Position != rs.lastEntry.Position+1 {
 		return fmt.Errorf("log entry position must be last log entry position + 1")
@@ -187,6 +273,7 @@ func (l *Log) _readLastLogEntry() (LogEntry, error) {
 
 	var lastLine string
 	scanner := bufio.NewScanner(logfile)
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line != "" {
